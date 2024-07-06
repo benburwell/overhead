@@ -77,6 +77,8 @@ func (a *App) Run(ctx context.Context) error {
 		switch m := msg.Payload.(type) {
 		case firehose.PositionMessage:
 			a.handlePosition(&m)
+		case firehose.ErrorMessage:
+			return fmt.Errorf("firehose error: %s", m.ErrorMessage)
 		}
 	}
 }
