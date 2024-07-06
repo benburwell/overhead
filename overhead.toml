@@ -1,0 +1,7 @@
+# Provide your Firehose username and password here
+username = ""
+password = ""
+
+# Set the location you want alerts around
+latitude = 40.0
+longitude = -70.0

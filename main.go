@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/spf13/pflag"
 	"log"
 	"os"
 	"os/signal"
@@ -12,22 +13,54 @@ import (
 	"time"
 
 	"github.com/benburwell/firehose"
-	"github.com/kelseyhightower/envconfig"
 	"github.com/skypies/geo"
+	"github.com/spf13/viper"
 )
 
 const (
-	InterestingRadiusNM            float64       = 10
-	NotificationThresholdNM        float64       = 3
-	InterestingAltitudeCeilingFeet float64       = 15000
-	CleanupAfter                   time.Duration = 10 * time.Minute
+	CleanupAfter = 10 * time.Minute
 )
 
 func main() {
-	var app App
+	pflag.String("username", "", "Username for Firehose authentication")
+	pflag.String("password", "", "Password for Firehose authentication")
+	pflag.Float64("interesting-radius", 10, "Radius in nautical miles around location to watch for flights")
+	pflag.Float64("interesting-ceiling", 15000, "Maximum altitude in feet to watch for flights")
+	pflag.Float64("alert-radius", 3, "Radius in nautical miles around location to alert on approaching flights")
+	configFile := pflag.StringP("config-file", "c", "overhead.toml", "Config file name")
+	showHelp := pflag.BoolP("help", "h", false, "Show help")
+	pflag.Parse()
 
-	if err := envconfig.Process("", &app); err != nil {
+	if *showHelp {
+		pflag.Usage()
+		os.Exit(0)
+	}
+
+	// If the user has specified a particular config file, read that one.
+	if *configFile != "" {
+		viper.SetConfigFile(*configFile)
+	} else {
+		// Otherwise, set the default config file base name
+		viper.AddConfigPath("$HOME/.config/overhead/")
+		viper.SetConfigName("overhead")
+		viper.AddConfigPath(".")
+	}
+	if err := viper.ReadInConfig(); err != nil {
 		log.Fatal(err.Error())
+	}
+
+	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
+		log.Fatal(err.Error())
+	}
+
+	app := &App{
+		Username:             viper.GetString("username"),
+		Password:             viper.GetString("password"),
+		Latitude:             viper.GetFloat64("latitude"),
+		Longitude:            viper.GetFloat64("longitude"),
+		InterestingRadiusNM:  viper.GetFloat64("interesting-radius"),
+		InterestingCeilingFt: viper.GetFloat64("interesting-ceiling"),
+		AlertRadiusNM:        viper.GetFloat64("alert-radius"),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -40,10 +73,13 @@ func main() {
 }
 
 type App struct {
-	Username  string  `envconfig:"FIREHOSE_USERNAME"`
-	Password  string  `envconfig:"FIREHOSE_PASSWORD"`
-	Latitude  float64 `envconfig:"LATITUDE"`
-	Longitude float64 `envconfig:"LONGITUDE"`
+	Username             string
+	Password             string
+	Latitude             float64
+	Longitude            float64
+	InterestingRadiusNM  float64
+	InterestingCeilingFt float64
+	AlertRadiusNM        float64
 
 	flights map[string]*position
 	// currentTime stores the most recently received clock
@@ -101,10 +137,10 @@ func (a *App) cleanupStaleFlights() {
 
 func (a *App) flightObservationBox() firehose.Rectangle {
 	center := a.myLocation()
-	minLat := center.MoveNM(180, InterestingRadiusNM)
-	maxLat := center.MoveNM(0, InterestingRadiusNM)
-	minLon := center.MoveNM(270, InterestingRadiusNM)
-	maxLon := center.MoveNM(90, InterestingRadiusNM)
+	minLat := center.MoveNM(180, a.InterestingRadiusNM)
+	maxLat := center.MoveNM(0, a.InterestingRadiusNM)
+	minLon := center.MoveNM(270, a.InterestingRadiusNM)
+	maxLon := center.MoveNM(90, a.InterestingRadiusNM)
 	return firehose.Rectangle{
 		LowLat: minLat.Lat,
 		LowLon: minLon.Long,
@@ -115,10 +151,10 @@ func (a *App) flightObservationBox() firehose.Rectangle {
 
 func (a *App) isInteresting(pos *position) bool {
 	dist := pos.point.DistNM(a.myLocation())
-	if dist > InterestingRadiusNM {
+	if dist > a.InterestingRadiusNM {
 		return false
 	}
-	if pos.altitude != nil && *pos.altitude > InterestingAltitudeCeilingFeet {
+	if pos.altitude != nil && *pos.altitude > a.InterestingCeilingFt {
 		return false
 	}
 	return true
@@ -219,7 +255,7 @@ func (a *App) handlePosition(msg *firehose.PositionMessage) {
 		me := a.myLocation()
 		distToPrev := prev.point.DistNM(me)
 		distToCurr := curr.point.DistNM(me)
-		if distToCurr < distToPrev && distToCurr < NotificationThresholdNM {
+		if distToCurr < distToPrev && distToCurr < a.AlertRadiusNM {
 			a.displayFlight(curr)
 		}
 	}

@@ -34,6 +34,6 @@ relative position and direction of the approaching aircraft.
 
 ## How to use it
 
-Copy `.env-sample` to `.env` and then fill in your Firehose credentials and the location you're interested in.
+Edit `overhead.toml` by filling in your Firehose credentials and the location you're interested in.
 
-Then run `make run`.
+Then run `go build` and then `./overhead`.
