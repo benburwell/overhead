@@ -118,6 +118,7 @@ type position struct {
 	destination  string
 	aircraftType string
 	speed        *float64
+	heading      *float64
 }
 
 func newPosition(msg *firehose.PositionMessage) (*position, error) {
@@ -153,6 +154,20 @@ func newPosition(msg *firehose.PositionMessage) (*position, error) {
 			return nil, fmt.Errorf("gs: %w", err)
 		}
 		pos.speed = &gs
+	}
+	var heading string
+	if msg.Heading != "" {
+		heading = msg.Heading
+	}
+	if msg.HeadingTrue != "" {
+		heading = msg.HeadingTrue
+	}
+	if heading != "" {
+		hdg, err := strconv.ParseFloat(heading, 64)
+		if err != nil {
+			return nil, fmt.Errorf("heading: %w", err)
+		}
+		pos.heading = &hdg
 	}
 	return &pos, nil
 }
@@ -197,8 +212,12 @@ func (a *App) handlePosition(msg *firehose.PositionMessage) {
 			if curr.altitude != nil {
 				alert.WriteString(fmt.Sprintf(" at %.0fft", *curr.altitude))
 			}
+			dir := "travelling"
+			if curr.heading != nil {
+				dir = cardinalDirection(*curr.heading) + "bound"
+			}
 			if curr.speed != nil {
-				alert.WriteString(fmt.Sprintf(" travelling at %.0fkts", *curr.speed))
+				alert.WriteString(fmt.Sprintf(" %s at %.0fkts", dir, *curr.speed))
 			}
 
 			fmt.Println(alert.String())
