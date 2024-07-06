@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/benburwell/firehose"
 	"github.com/kelseyhightower/envconfig"
@@ -197,33 +198,44 @@ func (a *App) handlePosition(msg *firehose.PositionMessage) {
 		distToPrev := prev.point.DistNM(me)
 		distToCurr := curr.point.DistNM(me)
 		if distToCurr < distToPrev && distToCurr < NotificationThresholdNM {
-			bearing := me.BearingTowards(curr.point)
-
-			var alert strings.Builder
-			alert.WriteString(curr.ident)
-			if curr.aircraftType != "" {
-				alert.WriteString(" (" + curr.aircraftType + ")")
-			}
-			alert.WriteString(" from " + curr.origin)
-			if curr.destination != "" {
-				alert.WriteString(" to " + curr.destination)
-			}
-			alert.WriteString(fmt.Sprintf(" is %.1fnm to the %s", distToCurr, cardinalDirection(bearing)))
-			if curr.altitude != nil {
-				alert.WriteString(fmt.Sprintf(" at %.0fft", *curr.altitude))
-			}
-			dir := "travelling"
-			if curr.heading != nil {
-				dir = cardinalDirection(*curr.heading) + "bound"
-			}
-			if curr.speed != nil {
-				alert.WriteString(fmt.Sprintf(" %s at %.0fkts", dir, *curr.speed))
-			}
-
-			fmt.Println(alert.String())
+			a.displayFlight(curr)
 		}
 	}
 	a.flights[curr.flightID] = curr
+}
+
+func (a *App) displayFlight(curr *position) {
+	me := a.myLocation()
+	dist := curr.point.DistNM(me)
+	bearing := me.BearingTowards(curr.point)
+
+	var alert strings.Builder
+
+	alert.WriteString(fmt.Sprintf("[%s] ", time.Now().Format("15:04:05")))
+
+	alert.WriteString(curr.ident)
+	if curr.aircraftType != "" {
+		alert.WriteString(" (" + curr.aircraftType + ")")
+	}
+	alert.WriteString(" from " + curr.origin)
+	if curr.destination != "" {
+		alert.WriteString(" to " + curr.destination)
+	}
+	alert.WriteString(fmt.Sprintf(" is %.1fnm to the %s", dist, cardinalDirection(bearing)))
+	if curr.altitude != nil {
+		alert.WriteString(fmt.Sprintf(" at %.0fft", *curr.altitude))
+	}
+	dir := "travelling"
+	if curr.heading != nil {
+		dir = cardinalDirection(*curr.heading) + "bound"
+	}
+	if curr.speed != nil {
+		alert.WriteString(fmt.Sprintf(" %s at %.0fkts", dir, *curr.speed))
+	}
+
+	alert.WriteString(fmt.Sprintf("\n\thttps://www.flightaware.com/live/flight/id/%s", curr.flightID))
+
+	fmt.Println(alert.String())
 }
 
 func cardinalDirection(bearing float64) string {
