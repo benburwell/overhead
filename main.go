@@ -255,7 +255,7 @@ func (a *App) displayFlight(curr *position) {
 		alert.WriteString(fmt.Sprintf(" %s at %.0fkts", dir, *curr.speed))
 	}
 
-	alert.WriteString(fmt.Sprintf("\n\thttps://www.flightaware.com/live/flight/id/%s", curr.flightID))
+	alert.WriteString(fmt.Sprintf("\n           https://www.flightaware.com/live/flight/id/%s", curr.flightID))
 
 	fmt.Println(alert.String())
 }
