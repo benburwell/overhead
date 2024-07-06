@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	InterestingRadiusNM            float64 = 10
-	NotificationThresholdNM        float64 = 3
-	InterestingAltitudeCeilingFeet float64 = 15000
+	InterestingRadiusNM            float64       = 10
+	NotificationThresholdNM        float64       = 3
+	InterestingAltitudeCeilingFeet float64       = 15000
+	CleanupAfter                   time.Duration = 10 * time.Minute
 )
 
 func main() {
@@ -45,6 +46,8 @@ type App struct {
 	Longitude float64 `envconfig:"LONGITUDE"`
 
 	flights map[string]*position
+	// currentTime stores the most recently received clock
+	currentTime time.Time
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -80,6 +83,18 @@ func (a *App) Run(ctx context.Context) error {
 			a.handlePosition(&m)
 		case firehose.ErrorMessage:
 			return fmt.Errorf("firehose error: %s", m.ErrorMessage)
+		}
+
+		a.cleanupStaleFlights()
+	}
+}
+
+// cleanupStaleFlights removes any flights that have not been seen recently from the map.
+func (a *App) cleanupStaleFlights() {
+	for id, flight := range a.flights {
+		// last heard + cleanup after < current time
+		if flight.timestamp.Add(CleanupAfter).Before(a.currentTime) {
+			delete(a.flights, id)
 		}
 	}
 }
@@ -192,6 +207,7 @@ func (a *App) handlePosition(msg *firehose.PositionMessage) {
 		log.Printf("could not translate position message: %v", err)
 		return
 	}
+	a.currentTime = curr.timestamp
 	if !a.isInteresting(curr) {
 		return
 	}
