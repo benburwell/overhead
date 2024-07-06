@@ -120,6 +120,7 @@ type position struct {
 	aircraftType string
 	speed        *float64
 	heading      *float64
+	timestamp    time.Time
 }
 
 func newPosition(msg *firehose.PositionMessage) (*position, error) {
@@ -170,6 +171,11 @@ func newPosition(msg *firehose.PositionMessage) (*position, error) {
 		}
 		pos.heading = &hdg
 	}
+	clock, err := strconv.ParseInt(msg.Clock, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("clock: %w", err)
+	}
+	pos.timestamp = time.Unix(clock, 0)
 	return &pos, nil
 }
 
@@ -211,7 +217,7 @@ func (a *App) displayFlight(curr *position) {
 
 	var alert strings.Builder
 
-	alert.WriteString(fmt.Sprintf("[%s] ", time.Now().Format("15:04:05")))
+	alert.WriteString(fmt.Sprintf("[%s] ", curr.timestamp.Format("15:04:05")))
 
 	alert.WriteString(curr.ident)
 	if curr.aircraftType != "" {
