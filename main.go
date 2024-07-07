@@ -4,16 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/spf13/pflag"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/benburwell/firehose"
 	"github.com/skypies/geo"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -27,6 +29,7 @@ func main() {
 	pflag.Float64("interesting-radius", 10, "Radius in nautical miles around location to watch for flights")
 	pflag.Float64("interesting-ceiling", 15000, "Maximum altitude in feet to watch for flights")
 	pflag.Float64("alert-radius", 3, "Radius in nautical miles around location to alert on approaching flights")
+	pflag.Bool("announce", false, "Aurally announce approaching aircraft")
 	configFile := pflag.StringP("config-file", "c", "overhead.toml", "Config file name")
 	showHelp := pflag.BoolP("help", "h", false, "Show help")
 	pflag.Parse()
@@ -61,6 +64,7 @@ func main() {
 		InterestingRadiusNM:  viper.GetFloat64("interesting-radius"),
 		InterestingCeilingFt: viper.GetFloat64("interesting-ceiling"),
 		AlertRadiusNM:        viper.GetFloat64("alert-radius"),
+		Announce:             viper.GetBool("announce"),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -80,6 +84,7 @@ type App struct {
 	InterestingRadiusNM  float64
 	InterestingCeilingFt float64
 	AlertRadiusNM        float64
+	Announce             bool
 
 	flights map[string]*position
 	// currentTime stores the most recently received clock
@@ -256,10 +261,17 @@ func (a *App) handlePosition(msg *firehose.PositionMessage) {
 		distToPrev := prev.point.DistNM(me)
 		distToCurr := curr.point.DistNM(me)
 		if distToCurr < distToPrev && distToCurr < a.AlertRadiusNM {
-			a.displayFlight(curr)
+			a.alert(curr)
 		}
 	}
 	a.flights[curr.flightID] = curr
+}
+
+func (a *App) alert(curr *position) {
+	a.displayFlight(curr)
+	if a.Announce {
+		a.say(curr)
+	}
 }
 
 func (a *App) displayFlight(curr *position) {
@@ -294,6 +306,159 @@ func (a *App) displayFlight(curr *position) {
 	alert.WriteString(fmt.Sprintf("\n           https://www.flightaware.com/live/flight/id/%s", curr.flightID))
 
 	fmt.Println(alert.String())
+}
+
+func (a *App) say(curr *position) {
+	me := a.myLocation()
+	dist := curr.point.DistNM(me)
+	bearing := me.BearingTowards(curr.point)
+
+	var words []string
+	words = append(words, identToWords(curr.ident)...)
+	words = append(words, "is")
+	words = append(words, phonetic(fmt.Sprintf("%.1f", dist))...)
+	words = append(words, "nautical miles")
+	words = append(words, "to the", cardinalDirection(bearing), ",")
+	if curr.altitude != nil {
+		words = append(words, "at")
+		words = append(words, altitudeToWords(*curr.altitude)...)
+		words = append(words, ",")
+	}
+	if curr.heading != nil {
+		words = append(words, cardinalDirection(*curr.heading), "bound", ",")
+	}
+	if curr.speed != nil {
+		words = append(words, phonetic(fmt.Sprintf("%.0f", *curr.speed))...)
+		words = append(words, "knots")
+	}
+	alert := strings.Join(words, " ")
+
+	if err := exec.Command("say", "-r", "200", alert).Run(); err != nil {
+		log.Println(err.Error())
+	}
+}
+
+func identToWords(ident string) []string {
+	icaoRegex := regexp.MustCompile("^[A-Z]{3}")
+	icao := icaoRegex.FindString(ident)
+	if icao == "" {
+		return phonetic(ident)
+	}
+	suffix := ident[3:]
+	callsign := icaoCallsign(icao)
+	if callsign == "" {
+		return phonetic(ident)
+	}
+
+	words := []string{callsign}
+	numberRegex := regexp.MustCompile("^[0-9]{2,4}$")
+	if numberRegex.MatchString(suffix) {
+		switch len(suffix) {
+		case 2:
+			words = append(words, suffix)
+		case 3:
+			words = append(words, suffix[0:1], suffix[1:])
+		case 4:
+			words = append(words, suffix[0:2], suffix[2:])
+		}
+	} else {
+		words = append(words, phonetic(suffix)...)
+	}
+	return words
+}
+
+func icaoCallsign(icao string) string {
+	callsigns := map[string]string{
+		"UAL": "united",
+		"FDX": "fedex",
+		"DAL": "delta",
+		"KAP": "cair",
+		"NKS": "spirit",
+		"RPA": "brickyard",
+		"ACA": "air canada",
+		"POE": "porter",
+		"SWA": "southwest",
+		"JBU": "jet blue",
+		"EIN": "shamrock",
+		"AAL": "american",
+		"ASA": "alaska",
+		"FFT": "frontier flight",
+		"JAL": "japan air",
+		"JZA": "jazz",
+		"AFR": "air france",
+		"FPY": "player",
+		"WUP": "up jet",
+		"BAW": "speed bird",
+		"VJA": "vista am",
+	}
+	return callsigns[icao]
+}
+
+func altitudeToWords(altitude float64) []string {
+	var words []string
+	thousands := int(altitude) / 1000
+	if thousands > 0 {
+		words = append(words, phonetic(strconv.Itoa(thousands))...)
+		words = append(words, "thousand")
+	}
+	hundreds := (int(altitude) - (thousands * 1000)) / 100
+	if hundreds > 0 {
+		words = append(words, phonetic(strconv.Itoa(hundreds))...)
+		words = append(words, "hundred")
+	}
+	return words
+}
+
+func phonetic(plain string) []string {
+	var words []string
+	alphabet := map[rune]string{
+		'A': "alpha",
+		'B': "bravo",
+		'C': "charlie",
+		'D': "delta",
+		'E': "echo",
+		'F': "foxtrot",
+		'G': "golf",
+		'H': "hotel",
+		'I': "india",
+		'J': "juliet",
+		'K': "kilo",
+		'L': "lima",
+		'M': "mike",
+		'N': "november",
+		'O': "oscar",
+		'P': "papa",
+		'Q': "quebec",
+		'R': "romeo",
+		'S': "sierra",
+		'T': "tango",
+		'U': "uniform",
+		'V': "victor",
+		'W': "whiskey",
+		'X': "x-ray",
+		'Y': "yankee",
+		'Z': "zulu",
+		'0': "zero",
+		'1': "one",
+		'2': "two",
+		'3': "three",
+		'4': "four",
+		'5': "five",
+		'6': "six",
+		'7': "seven",
+		'8': "eight",
+		'9': "niner",
+		'.': "point",
+	}
+	for _, r := range plain {
+		word, ok := alphabet[r]
+		if ok {
+			words = append(words, word)
+		} else {
+			words = append(words, string(r))
+		}
+	}
+	return words
 }
 
 func cardinalDirection(bearing float64) string {
