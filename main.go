@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -20,7 +23,8 @@ import (
 )
 
 const (
-	CleanupAfter = 10 * time.Minute
+	CleanupAfter   = 10 * time.Minute
+	WebhookTimeout = 10 * time.Second
 )
 
 func main() {
@@ -30,6 +34,7 @@ func main() {
 	pflag.Float64("interesting-ceiling", 15000, "Maximum altitude in feet to watch for flights")
 	pflag.Float64("alert-radius", 3, "Radius in nautical miles around location to alert on approaching flights")
 	pflag.Bool("announce", false, "Aurally announce approaching aircraft")
+	pflag.String("webhook-url", "", "URL to optionally send position updates to")
 	configFile := pflag.StringP("config-file", "c", "overhead.toml", "Config file name")
 	showHelp := pflag.BoolP("help", "h", false, "Show help")
 	pflag.Parse()
@@ -65,6 +70,7 @@ func main() {
 		InterestingCeilingFt: viper.GetFloat64("interesting-ceiling"),
 		AlertRadiusNM:        viper.GetFloat64("alert-radius"),
 		Announce:             viper.GetBool("announce"),
+		WebhookURL:           viper.GetString("webhook-url"),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -85,8 +91,9 @@ type App struct {
 	InterestingCeilingFt float64
 	AlertRadiusNM        float64
 	Announce             bool
+	WebhookURL           string
 
-	flights map[string]*position
+	flights map[string]*Position
 	// currentTime stores the most recently received clock
 	currentTime time.Time
 }
@@ -134,7 +141,7 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) cleanupStaleFlights() {
 	for id, flight := range a.flights {
 		// last heard + cleanup after < current time
-		if flight.timestamp.Add(CleanupAfter).Before(a.currentTime) {
+		if flight.Timestamp.Add(CleanupAfter).Before(a.currentTime) {
 			delete(a.flights, id)
 		}
 	}
@@ -154,34 +161,34 @@ func (a *App) flightObservationBox() firehose.Rectangle {
 	}
 }
 
-func (a *App) isInteresting(pos *position) bool {
-	dist := pos.point.DistNM(a.myLocation())
+func (a *App) isInteresting(pos *Position) bool {
+	dist := pos.Point.DistNM(a.myLocation())
 	if dist > a.InterestingRadiusNM {
 		return false
 	}
-	if pos.altitude != nil && *pos.altitude > a.InterestingCeilingFt {
+	if pos.Altitude != nil && *pos.Altitude > a.InterestingCeilingFt {
 		return false
 	}
 	return true
 }
 
-type position struct {
-	flightID     string
-	point        geo.Latlong
-	altitude     *float64
-	ident        string
-	reg          string
-	origin       string
-	destination  string
-	aircraftType string
-	speed        *float64
-	heading      *float64
-	timestamp    time.Time
+type Position struct {
+	FlightID     string
+	Point        geo.Latlong
+	Altitude     *float64
+	Ident        string
+	Reg          string
+	Origin       string
+	Destination  string
+	AircraftType string
+	Speed        *float64
+	Heading      *float64
+	Timestamp    time.Time
 }
 
-func newPosition(msg *firehose.PositionMessage) (*position, error) {
-	var pos position
-	pos.flightID = msg.ID
+func newPosition(msg *firehose.PositionMessage) (*Position, error) {
+	var pos Position
+	pos.FlightID = msg.ID
 	lat, err := strconv.ParseFloat(msg.Lat, 64)
 	if err != nil {
 		return nil, fmt.Errorf("lat: %w", err)
@@ -190,7 +197,7 @@ func newPosition(msg *firehose.PositionMessage) (*position, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lon: %w", err)
 	}
-	pos.point = geo.Latlong{
+	pos.Point = geo.Latlong{
 		Lat:  lat,
 		Long: lon,
 	}
@@ -199,19 +206,19 @@ func newPosition(msg *firehose.PositionMessage) (*position, error) {
 		if err != nil {
 			return nil, fmt.Errorf("alt: %w", err)
 		}
-		pos.altitude = &alt
+		pos.Altitude = &alt
 	}
-	pos.ident = msg.Ident
-	pos.reg = msg.Reg
-	pos.origin = msg.Orig
-	pos.destination = msg.Dest
-	pos.aircraftType = msg.AircraftType
+	pos.Ident = msg.Ident
+	pos.Reg = msg.Reg
+	pos.Origin = msg.Orig
+	pos.Destination = msg.Dest
+	pos.AircraftType = msg.AircraftType
 	if msg.GS != "" {
 		gs, err := strconv.ParseFloat(msg.GS, 64)
 		if err != nil {
 			return nil, fmt.Errorf("gs: %w", err)
 		}
-		pos.speed = &gs
+		pos.Speed = &gs
 	}
 	var heading string
 	if msg.Heading != "" {
@@ -225,13 +232,13 @@ func newPosition(msg *firehose.PositionMessage) (*position, error) {
 		if err != nil {
 			return nil, fmt.Errorf("heading: %w", err)
 		}
-		pos.heading = &hdg
+		pos.Heading = &hdg
 	}
 	clock, err := strconv.ParseInt(msg.Clock, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("clock: %w", err)
 	}
-	pos.timestamp = time.Unix(clock, 0)
+	pos.Timestamp = time.Unix(clock, 0)
 	return &pos, nil
 }
 
@@ -248,87 +255,116 @@ func (a *App) handlePosition(msg *firehose.PositionMessage) {
 		log.Printf("could not translate position message: %v", err)
 		return
 	}
-	a.currentTime = curr.timestamp
+	a.currentTime = curr.Timestamp
 	if !a.isInteresting(curr) {
 		return
 	}
 
 	if a.flights == nil {
-		a.flights = make(map[string]*position)
+		a.flights = make(map[string]*Position)
 	}
-	if prev, ok := a.flights[curr.flightID]; ok {
+	if prev, ok := a.flights[curr.FlightID]; ok {
 		me := a.myLocation()
-		distToPrev := prev.point.DistNM(me)
-		distToCurr := curr.point.DistNM(me)
+		distToPrev := prev.Point.DistNM(me)
+		distToCurr := curr.Point.DistNM(me)
 		if distToCurr < distToPrev && distToCurr < a.AlertRadiusNM {
 			a.alert(curr)
 		}
 	}
-	a.flights[curr.flightID] = curr
+	a.flights[curr.FlightID] = curr
 }
 
-func (a *App) alert(curr *position) {
-	a.displayFlight(curr)
-	if a.Announce {
-		a.say(curr)
+func (a *App) alert(curr *Position) {
+	go a.displayFlight(curr)
+	go a.postWebhook(curr)
+	go a.say(curr)
+}
+
+func (a *App) postWebhook(pos *Position) {
+	if a.WebhookURL == "" {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), WebhookTimeout)
+	defer cancel()
+	body, err := json.Marshal(pos)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.WebhookURL, bytes.NewReader(body))
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("user-agent", "overhead-webhook https://github.com/benburwell/overhead")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	log.Printf("sent webhook to %s and got HTTP response code %s", a.WebhookURL, res.Status)
 }
 
-func (a *App) displayFlight(curr *position) {
+func (a *App) displayFlight(curr *Position) {
 	me := a.myLocation()
-	dist := curr.point.DistNM(me)
-	bearing := me.BearingTowards(curr.point)
+	dist := curr.Point.DistNM(me)
+	bearing := me.BearingTowards(curr.Point)
 
 	var alert strings.Builder
 
-	alert.WriteString(fmt.Sprintf("[%s] ", curr.timestamp.Format("15:04:05")))
+	alert.WriteString(fmt.Sprintf("[%s] ", curr.Timestamp.Format("15:04:05")))
 
-	alert.WriteString(curr.ident)
-	if curr.aircraftType != "" {
-		alert.WriteString(" (" + curr.aircraftType + ")")
+	alert.WriteString(curr.Ident)
+	if curr.AircraftType != "" {
+		alert.WriteString(" (" + curr.AircraftType + ")")
 	}
-	alert.WriteString(" from " + curr.origin)
-	if curr.destination != "" {
-		alert.WriteString(" to " + curr.destination)
+	alert.WriteString(" from " + curr.Origin)
+	if curr.Destination != "" {
+		alert.WriteString(" to " + curr.Destination)
 	}
 	alert.WriteString(fmt.Sprintf(" is %.1fnm to the %s", dist, cardinalDirection(bearing)))
-	if curr.altitude != nil {
-		alert.WriteString(fmt.Sprintf(" at %.0fft", *curr.altitude))
+	if curr.Altitude != nil {
+		alert.WriteString(fmt.Sprintf(" at %.0fft", *curr.Altitude))
 	}
 	dir := "travelling"
-	if curr.heading != nil {
-		dir = cardinalDirection(*curr.heading) + "bound"
+	if curr.Heading != nil {
+		dir = cardinalDirection(*curr.Heading) + "bound"
 	}
-	if curr.speed != nil {
-		alert.WriteString(fmt.Sprintf(" %s at %.0fkts", dir, *curr.speed))
+	if curr.Speed != nil {
+		alert.WriteString(fmt.Sprintf(" %s at %.0fkts", dir, *curr.Speed))
 	}
 
-	alert.WriteString(fmt.Sprintf("\n           https://www.flightaware.com/live/flight/id/%s", curr.flightID))
+	alert.WriteString(fmt.Sprintf("\n           https://www.flightaware.com/live/flight/id/%s", curr.FlightID))
 
 	fmt.Println(alert.String())
 }
 
-func (a *App) say(curr *position) {
+func (a *App) say(curr *Position) {
+	if !a.Announce {
+		return
+	}
+
 	me := a.myLocation()
-	dist := curr.point.DistNM(me)
-	bearing := me.BearingTowards(curr.point)
+	dist := curr.Point.DistNM(me)
+	bearing := me.BearingTowards(curr.Point)
 
 	var words []string
-	words = append(words, identToWords(curr.ident)...)
+	words = append(words, identToWords(curr.Ident)...)
 	words = append(words, "is")
 	words = append(words, phonetic(fmt.Sprintf("%.1f", dist))...)
 	words = append(words, "nautical miles")
 	words = append(words, "to the", cardinalDirection(bearing), ",")
-	if curr.altitude != nil {
+	if curr.Altitude != nil {
 		words = append(words, "at")
-		words = append(words, altitudeToWords(*curr.altitude)...)
+		words = append(words, altitudeToWords(*curr.Altitude)...)
 		words = append(words, ",")
 	}
-	if curr.heading != nil {
-		words = append(words, cardinalDirection(*curr.heading), "bound", ",")
+	if curr.Heading != nil {
+		words = append(words, cardinalDirection(*curr.Heading), "bound", ",")
 	}
-	if curr.speed != nil {
-		words = append(words, phonetic(fmt.Sprintf("%.0f", *curr.speed))...)
+	if curr.Speed != nil {
+		words = append(words, phonetic(fmt.Sprintf("%.0f", *curr.Speed))...)
 		words = append(words, "knots")
 	}
 	alert := strings.Join(words, " ")
