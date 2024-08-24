@@ -162,8 +162,7 @@ func (a *App) flightObservationBox() firehose.Rectangle {
 }
 
 func (a *App) isInteresting(pos *Position) bool {
-	dist := pos.Point.DistNM(a.myLocation())
-	if dist > a.InterestingRadiusNM {
+	if pos.Distance > a.InterestingRadiusNM {
 		return false
 	}
 	if pos.Altitude != nil && *pos.Altitude > a.InterestingCeilingFt {
@@ -184,9 +183,11 @@ type Position struct {
 	Speed        *float64
 	Heading      *float64
 	Timestamp    time.Time
+	Distance     float64
+	Bearing      float64
 }
 
-func newPosition(msg *firehose.PositionMessage) (*Position, error) {
+func (a *App) newPosition(msg *firehose.PositionMessage) (*Position, error) {
 	var pos Position
 	pos.FlightID = msg.ID
 	lat, err := strconv.ParseFloat(msg.Lat, 64)
@@ -239,6 +240,8 @@ func newPosition(msg *firehose.PositionMessage) (*Position, error) {
 		return nil, fmt.Errorf("clock: %w", err)
 	}
 	pos.Timestamp = time.Unix(clock, 0)
+	pos.Distance = pos.Point.DistNM(a.myLocation())
+	pos.Bearing = a.myLocation().BearingTowards(pos.Point)
 	return &pos, nil
 }
 
@@ -250,7 +253,7 @@ func (a *App) myLocation() geo.Latlong {
 }
 
 func (a *App) handlePosition(msg *firehose.PositionMessage) {
-	curr, err := newPosition(msg)
+	curr, err := a.newPosition(msg)
 	if err != nil {
 		log.Printf("could not translate position message: %v", err)
 		return
@@ -264,10 +267,7 @@ func (a *App) handlePosition(msg *firehose.PositionMessage) {
 		a.flights = make(map[string]*Position)
 	}
 	if prev, ok := a.flights[curr.FlightID]; ok {
-		me := a.myLocation()
-		distToPrev := prev.Point.DistNM(me)
-		distToCurr := curr.Point.DistNM(me)
-		if distToCurr < distToPrev && distToCurr < a.AlertRadiusNM {
+		if curr.Distance < prev.Distance && curr.Distance < a.AlertRadiusNM {
 			a.alert(curr)
 		}
 	}
@@ -307,9 +307,6 @@ func (a *App) postWebhook(pos *Position) {
 }
 
 func (a *App) displayFlight(curr *Position) {
-	me := a.myLocation()
-	dist := curr.Point.DistNM(me)
-	bearing := me.BearingTowards(curr.Point)
 
 	var alert strings.Builder
 
@@ -323,7 +320,7 @@ func (a *App) displayFlight(curr *Position) {
 	if curr.Destination != "" {
 		alert.WriteString(" to " + curr.Destination)
 	}
-	alert.WriteString(fmt.Sprintf(" is %.1fnm to the %s", dist, cardinalDirection(bearing)))
+	alert.WriteString(fmt.Sprintf(" is %.1fnm to the %s", curr.Distance, cardinalDirection(curr.Bearing)))
 	if curr.Altitude != nil {
 		alert.WriteString(fmt.Sprintf(" at %.0fft", *curr.Altitude))
 	}
@@ -344,17 +341,12 @@ func (a *App) say(curr *Position) {
 	if !a.Announce {
 		return
 	}
-
-	me := a.myLocation()
-	dist := curr.Point.DistNM(me)
-	bearing := me.BearingTowards(curr.Point)
-
 	var words []string
 	words = append(words, identToWords(curr.Ident)...)
 	words = append(words, "is")
-	words = append(words, phonetic(fmt.Sprintf("%.1f", dist))...)
+	words = append(words, phonetic(fmt.Sprintf("%.1f", curr.Distance))...)
 	words = append(words, "nautical miles")
-	words = append(words, "to the", cardinalDirection(bearing), ",")
+	words = append(words, "to the", cardinalDirection(curr.Bearing), ",")
 	if curr.Altitude != nil {
 		words = append(words, "at")
 		words = append(words, altitudeToWords(*curr.Altitude)...)
